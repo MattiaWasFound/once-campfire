@@ -1,0 +1,38 @@
+#!/bin/bash -e
+# Boot Campfire on the VPS behind nginx (TLS terminated there), without
+# Docker or thrust. Spawns redis + resque-pool if needed, then runs puma in
+# the foreground so ~/bin/sm can track it by port.
+#
+# Expects secrets in ./.env (gitignored): SECRET_KEY_BASE, VAPID_PRIVATE_KEY,
+# VAPID_PUBLIC_KEY, PORT, WEB_CONCURRENCY, JOB_CONCURRENCY.
+
+cd "$(dirname "$0")/.."
+
+export PATH="$HOME/.local/share/mise/shims:$PATH"
+export RAILS_ENV=production
+set -a; source .env; set +a
+
+# Redis: queue/pubsub only, no persistence (config/redis.conf)
+if ! redis-cli -p 6379 ping 2>/dev/null | grep -q PONG; then
+  nohup redis-server config/redis.conf >> log/redis.log 2>&1 &
+  sleep 1
+fi
+
+# Precompile assets once (the Dockerfile does this at image build time)
+if [ ! -d public/assets ]; then
+  bundle exec rails assets:precompile
+fi
+
+# Resque workers: replace any previous pool
+if [ -f tmp/pids/resque-pool.pid ] && kill -0 "$(cat tmp/pids/resque-pool.pid)" 2>/dev/null; then
+  kill "$(cat tmp/pids/resque-pool.pid)"
+  sleep 2
+fi
+FORK_PER_JOB=false INTERVAL=0.1 bundle exec resque-pool --daemon \
+  --pidfile tmp/pids/resque-pool.pid \
+  --stdout log/resque-pool.log --stderr log/resque-pool.log
+
+# Web server (foreground; sm finds it by $PORT)
+rm -f tmp/pids/server.pid
+bundle exec rails db:prepare
+exec bundle exec rails server
