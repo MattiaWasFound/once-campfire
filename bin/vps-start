@@ -1,7 +1,7 @@
 #!/bin/bash -e
 # Boot Campfire on the VPS behind nginx (TLS terminated there), without
-# Docker or thrust. Spawns redis + resque-pool if needed, then runs puma in
-# the foreground so ~/bin/sm can track it by port.
+# Docker or thrust. Spawns redis + a resque worker if needed, then runs puma
+# in the foreground so ~/bin/sm can track it by port.
 #
 # Expects secrets in ./.env (gitignored): SECRET_KEY_BASE, VAPID_PRIVATE_KEY,
 # VAPID_PUBLIC_KEY, PORT, WEB_CONCURRENCY, JOB_CONCURRENCY.
@@ -23,14 +23,18 @@ if [ ! -d public/assets ]; then
   bundle exec rails assets:precompile
 fi
 
-# Resque workers: replace any previous pool
-if [ -f tmp/pids/resque-pool.pid ] && kill -0 "$(cat tmp/pids/resque-pool.pid)" 2>/dev/null; then
-  kill "$(cat tmp/pids/resque-pool.pid)"
-  sleep 2
-fi
-FORK_PER_JOB=false INTERVAL=0.1 bundle exec resque-pool --daemon \
-  --pidfile tmp/pids/resque-pool.pid \
-  --stdout log/resque-pool.log --stderr log/resque-pool.log
+# Resque: one bare worker, no resque-pool (saves ~125MB of pool master).
+# Replace any previous worker (and a legacy pool, if one is still around).
+for pidfile in tmp/pids/resque.pid tmp/pids/resque-pool.pid; do
+  if [ -f "$pidfile" ] && kill -0 "$(cat "$pidfile")" 2>/dev/null; then
+    kill "$(cat "$pidfile")"
+    sleep 2
+  fi
+  rm -f "$pidfile"
+done
+QUEUES='*' FORK_PER_JOB=false INTERVAL=0.1 \
+  PIDFILE=tmp/pids/resque.pid BACKGROUND=yes \
+  bundle exec rake resque:work >> log/resque.log 2>&1
 
 # Web server (foreground; sm finds it by $PORT)
 rm -f tmp/pids/server.pid
