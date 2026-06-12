@@ -1,0 +1,57 @@
+#!/usr/bin/env ruby
+# Export all rooms (messages + attachments) to Markdown, for backups.
+#
+#   bin/rails runner bin/export-markdown [output_dir]
+#
+# Default output_dir: tmp/export. One <room_id>-<name>.md per room, binary
+# attachments copied to <output_dir>/attachments/ and linked from the
+# markdown. Read-only: safe to run while the app is serving.
+
+require "fileutils"
+
+out = Pathname.new(ARGV[0] || "tmp/export")
+attachments_dir = out.join("attachments")
+FileUtils.mkdir_p(attachments_dir)
+
+def safe_name(name)
+  name.to_s.gsub(%r{[/\0]}, "-").strip
+end
+
+exported_rooms = 0
+exported_messages = 0
+
+Room.find_each do |room|
+  title = room.name.presence || room.users.map(&:name).sort.join(", ")
+  lines = ["# #{title}", ""]
+  lines << "_#{room.type.delete_prefix('Rooms::')} room, created #{room.created_at.strftime('%Y-%m-%d')}" \
+           " by #{room.creator&.name || 'unknown'}. Exported #{Time.now.utc.strftime('%Y-%m-%d %H:%M UTC')}._"
+  lines << ""
+
+  room.messages.ordered.with_creator.with_boosts.each do |message|
+    lines << "**#{message.creator.name}** — #{message.created_at.utc.strftime('%Y-%m-%d %H:%M')}"
+    body = message.body.to_plain_text.strip
+    lines << body unless body.empty?
+
+    if message.attachment.attached?
+      blob = message.attachment.blob
+      filename = "#{message.id}-#{safe_name(blob.filename)}"
+      dest = attachments_dir.join(filename)
+      unless dest.exist? && dest.size == blob.byte_size
+        File.open(dest, "wb") { |file| message.attachment.download { |chunk| file.write(chunk) } }
+      end
+      lines << "[attachment: #{blob.filename}](attachments/#{filename})"
+    end
+
+    message.boosts.each do |boost|
+      lines << "> boost: #{boost.content} (#{boost.booster.name})"
+    end
+
+    lines << ""
+    exported_messages += 1
+  end
+
+  File.write(out.join("#{room.id}-#{safe_name(title)}.md"), lines.join("\n"))
+  exported_rooms += 1
+end
+
+puts "exported #{exported_rooms} rooms, #{exported_messages} messages to #{out}"
