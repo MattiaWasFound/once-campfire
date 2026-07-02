@@ -10,7 +10,8 @@ cd "$(dirname "$0")/.."
 
 export PATH="$HOME/.local/share/mise/shims:$PATH"
 export RAILS_ENV=production
-set -a; source .env; set +a
+# .env is optional: secrets may instead arrive pre-injected in the process env
+[ -f .env ] && { set -a; source .env; set +a; }
 
 # Redis: queue/pubsub only, no persistence (config/redis.conf)
 if ! redis-cli -p 6379 ping 2>/dev/null | grep -q PONG; then
